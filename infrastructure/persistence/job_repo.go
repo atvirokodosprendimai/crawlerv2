@@ -54,6 +54,22 @@ func (r *GormCrawlJobRepository) FindActive(ctx context.Context, domainID uint) 
 	return &j, nil
 }
 
+func (r *GormCrawlJobRepository) FindRunning(ctx context.Context, domainID uint) ([]crawler.CrawlJob, error) {
+	q := r.db.WithContext(ctx).Where("status = ?", string(crawler.JobStatusRunning))
+	if domainID > 0 {
+		q = q.Where("domain_id = ?", domainID)
+	}
+	var models []CrawlJobModel
+	if err := q.Order("created_at ASC").Find(&models).Error; err != nil {
+		return nil, err
+	}
+	out := make([]crawler.CrawlJob, len(models))
+	for i, m := range models {
+		out[i] = modelToJob(&m)
+	}
+	return out, nil
+}
+
 func (r *GormCrawlJobRepository) FindAll(ctx context.Context, domainID uint, status crawler.JobStatus) ([]crawler.CrawlJob, error) {
 	q := r.db.WithContext(ctx).Model(&CrawlJobModel{})
 	if domainID > 0 {
@@ -81,15 +97,18 @@ func (r *GormCrawlJobRepository) SetEnded(ctx context.Context, jobID uint) error
 
 func jobToModel(j *crawler.CrawlJob) CrawlJobModel {
 	return CrawlJobModel{
-		ID:           j.ID,
-		DomainID:     j.DomainID,
-		Status:       string(j.Status),
-		StartedAt:    j.StartedAt,
-		EndedAt:      j.EndedAt,
-		ExtractTitle: j.ExtractConfig.ExtractTitle,
-		ExtractMeta:  j.ExtractConfig.ExtractMeta,
-		ExtractBody:  j.ExtractConfig.ExtractBody,
-		PagesCrawled: j.PagesCrawled,
+		ID:             j.ID,
+		DomainID:       j.DomainID,
+		Status:         string(j.Status),
+		StartedAt:      j.StartedAt,
+		EndedAt:        j.EndedAt,
+		ExtractTitle:   j.ExtractConfig.ExtractTitle,
+		ExtractMeta:    j.ExtractConfig.ExtractMeta,
+		ExtractBody:    j.ExtractConfig.ExtractBody,
+		DownloadBinary: j.ExtractConfig.DownloadBinary,
+		FilesDir:       j.ExtractConfig.FilesDir,
+		MaxFileSizeMB:  j.ExtractConfig.MaxFileSizeMB,
+		PagesCrawled:   j.PagesCrawled,
 	}
 }
 
@@ -99,9 +118,12 @@ func modelToJob(m *CrawlJobModel) crawler.CrawlJob {
 		DomainID: m.DomainID,
 		Status:   crawler.JobStatus(m.Status),
 		ExtractConfig: crawler.ExtractConfig{
-			ExtractTitle: m.ExtractTitle,
-			ExtractMeta:  m.ExtractMeta,
-			ExtractBody:  m.ExtractBody,
+			ExtractTitle:   m.ExtractTitle,
+			ExtractMeta:    m.ExtractMeta,
+			ExtractBody:    m.ExtractBody,
+			DownloadBinary: m.DownloadBinary,
+			FilesDir:       m.FilesDir,
+			MaxFileSizeMB:  m.MaxFileSizeMB,
 		},
 		PagesCrawled: m.PagesCrawled,
 		StartedAt:    m.StartedAt,

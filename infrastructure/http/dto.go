@@ -31,9 +31,12 @@ type PolitenessConfigDTO struct {
 }
 
 type ExtractConfigDTO struct {
-	ExtractTitle bool `json:"extract_title"`
-	ExtractMeta  bool `json:"extract_meta"`
-	ExtractBody  bool `json:"extract_body"`
+	ExtractTitle   bool   `json:"extract_title"`
+	ExtractMeta    bool   `json:"extract_meta"`
+	ExtractBody    bool   `json:"extract_body"`
+	DownloadBinary bool   `json:"download_binary"`
+	FilesDir       string `json:"files_dir"`
+	MaxFileSizeMB  int    `json:"max_file_size_mb"`
 }
 
 type TriggerJobRequest struct {
@@ -55,6 +58,10 @@ type WorkerResultItem struct {
 	MetaDesc     string   `json:"meta_desc"`
 	Body         string   `json:"body"`
 	Links        []string `json:"links"`
+	FilePath     string   `json:"file_path"`
+	FileSize     int64    `json:"file_size"`
+	FileHash     string   `json:"file_hash"`
+	StoreID      string   `json:"store_id"`
 	Error        string   `json:"error"`
 }
 
@@ -91,12 +98,13 @@ type CreateTokenResponse struct {
 }
 
 type TaskResponse struct {
-	TaskID        uint                `json:"task_id"`
-	URL           string              `json:"url"`
-	JobID         uint                `json:"job_id"`
-	Depth         int                 `json:"depth"`
-	ExtractConfig ExtractConfigDTO    `json:"extract"`
-	Politeness    PolitenessConfigDTO `json:"politeness"`
+	TaskID     uint                `json:"task_id"`
+	URL        string              `json:"url"`
+	JobID      uint                `json:"job_id"`
+	Depth      int                 `json:"depth"`
+	StoreID    string              `json:"store_id"`
+	Extract    ExtractConfigDTO    `json:"extract"`
+	Politeness PolitenessConfigDTO `json:"politeness"`
 }
 
 // --- mapper helpers ---

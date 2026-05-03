@@ -17,10 +17,14 @@ import (
 type Config struct {
 	MasterURL    string
 	Token        string
-	JobID        uint
+	DomainID     uint // optional — 0 means work on any running job
 	BatchSize    int
 	Concurrency  int
 	PollInterval time.Duration
+	// StorageConfig path — loaded into a Registry at startup. If empty, uses local ./files.
+	StorageConfigPath string
+	// DefaultFilesDir is used when StorageConfigPath is empty.
+	DefaultFilesDir string
 }
 
 // TaskResponse mirrors the server's task JSON.
@@ -30,9 +34,12 @@ type TaskResponse struct {
 	JobID   uint   `json:"job_id"`
 	Depth   int    `json:"depth"`
 	Extract struct {
-		ExtractTitle bool `json:"extract_title"`
-		ExtractMeta  bool `json:"extract_meta"`
-		ExtractBody  bool `json:"extract_body"`
+		ExtractTitle   bool   `json:"extract_title"`
+		ExtractMeta    bool   `json:"extract_meta"`
+		ExtractBody    bool   `json:"extract_body"`
+		DownloadBinary bool   `json:"download_binary"`
+		FilesDir       string `json:"files_dir"`
+		MaxFileSizeMB  int    `json:"max_file_size_mb"`
 	} `json:"extract"`
 	Politeness struct {
 		RespectRobotsTxt        bool `json:"respect_robots_txt"`
@@ -52,6 +59,9 @@ type resultItem struct {
 	MetaDesc     string   `json:"meta_desc"`
 	Body         string   `json:"body"`
 	Links        []string `json:"links"`
+	FilePath     string   `json:"file_path,omitempty"`
+	FileSize     int64    `json:"file_size,omitempty"`
+	FileHash     string   `json:"file_hash,omitempty"`
 	Error        string   `json:"error,omitempty"`
 }
 
@@ -134,15 +144,19 @@ func (r *Runner) Run(ctx context.Context) {
 		}
 		wg.Wait()
 
-		if err := r.submit(ctx, results); err != nil {
+		// All tasks in a batch share the same job ID (PollTasksUseCase returns from one job at a time)
+		jobID := tasks[0].JobID
+		if err := r.submit(ctx, jobID, results); err != nil {
 			log.Printf("worker: submit error: %v", err)
 		}
 	}
 }
 
 func (r *Runner) poll(ctx context.Context) ([]TaskResponse, error) {
-	u := fmt.Sprintf("%s/worker/tasks/next?job_id=%d&batch=%d",
-		r.cfg.MasterURL, r.cfg.JobID, r.cfg.BatchSize)
+	u := fmt.Sprintf("%s/worker/tasks/next?batch=%d", r.cfg.MasterURL, r.cfg.BatchSize)
+	if r.cfg.DomainID > 0 {
+		u += fmt.Sprintf("&domain_id=%d", r.cfg.DomainID)
+	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	req.Header.Set("Authorization", "Bearer "+r.cfg.Token)
 
@@ -197,8 +211,31 @@ func (r *Runner) crawl(ctx context.Context, t TaskResponse) resultItem {
 	res.ResponseTime = time.Since(start).Milliseconds()
 	res.ContentType = resp.Header.Get("Content-Type")
 
-	if resp.StatusCode == http.StatusOK {
-		page := ParsePage(io.LimitReader(resp.Body, 5*1024*1024), t.URL, t.Extract.ExtractBody)
+	if resp.StatusCode != http.StatusOK {
+		return res
+	}
+
+	filesDir := t.Extract.FilesDir
+	if filesDir == "" {
+		filesDir = "files"
+	}
+
+	maxBytes := int64(5 * 1024 * 1024) // 5 MB default for HTML
+	if t.Extract.MaxFileSizeMB > 0 {
+		maxBytes = int64(t.Extract.MaxFileSizeMB) * 1024 * 1024
+	}
+
+	ext := ExtFromContentType(res.ContentType)
+
+	if IsHTML(res.ContentType) {
+		// Read body (limited), parse links + metadata, save to filesystem
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+		if err != nil {
+			res.Error = err.Error()
+			return res
+		}
+
+		page := ParsePage(bytes.NewReader(body), t.URL, t.Extract.ExtractBody)
 		if t.Extract.ExtractTitle {
 			res.Title = page.Title
 		}
@@ -209,16 +246,41 @@ func (r *Runner) crawl(ctx context.Context, t TaskResponse) resultItem {
 			res.Body = page.Body
 		}
 		res.Links = page.Links
+
+		// Save HTML to filesystem
+		fs := NewFileStore(filesDir)
+		relPath, size, hash, err := fs.Write(t.URL, ext, bytes.NewReader(body))
+		if err != nil {
+			log.Printf("filestore: HTML save failed for %s: %v", t.URL, err)
+		} else {
+			res.FilePath = relPath
+			res.FileSize = size
+			res.FileHash = hash
+		}
+
+	} else if t.Extract.DownloadBinary {
+		// Stream directly to filesystem — no in-memory buffering
+		fs := NewFileStore(filesDir)
+		relPath, size, hash, err := fs.Write(t.URL, ext, io.LimitReader(resp.Body, maxBytes))
+		if err != nil {
+			log.Printf("filestore: binary save failed for %s: %v", t.URL, err)
+			res.Error = err.Error()
+		} else {
+			res.FilePath = relPath
+			res.FileSize = size
+			res.FileHash = hash
+		}
 	}
+
 	return res
 }
 
-func (r *Runner) submit(ctx context.Context, results []resultItem) error {
+func (r *Runner) submit(ctx context.Context, jobID uint, results []resultItem) error {
 	if len(results) == 0 {
 		return nil
 	}
 	body, _ := json.Marshal(map[string]any{"results": results})
-	u := fmt.Sprintf("%s/worker/jobs/%d/results", r.cfg.MasterURL, r.cfg.JobID)
+	u := fmt.Sprintf("%s/worker/jobs/%d/results", r.cfg.MasterURL, jobID)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+r.cfg.Token)
 	req.Header.Set("Content-Type", "application/json")

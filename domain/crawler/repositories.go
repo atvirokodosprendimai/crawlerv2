@@ -18,6 +18,7 @@ type CrawlJobRepository interface {
 	IncrementPages(ctx context.Context, jobID uint, count int) error
 	FindByID(ctx context.Context, id uint) (*CrawlJob, error)
 	FindActive(ctx context.Context, domainID uint) (*CrawlJob, error)
+	FindRunning(ctx context.Context, domainID uint) ([]CrawlJob, error) // domainID=0 means any domain
 	FindAll(ctx context.Context, domainID uint, status JobStatus) ([]CrawlJob, error)
 	SetEnded(ctx context.Context, jobID uint) error
 }
@@ -35,6 +36,10 @@ type URLRepository interface {
 type CrawlResultRepository interface {
 	Save(ctx context.Context, result *CrawlResult) error
 	FindByJob(ctx context.Context, jobID uint) ([]CrawlResult, error)
+	// FindByStore returns all results stored in a given store. Used for migration.
+	FindByStore(ctx context.Context, storeID string) ([]CrawlResult, error)
+	// UpdateStore updates StoreID for a single result after migration.
+	UpdateStore(ctx context.Context, resultID uint, newStoreID string) error
 }
 
 type TokenRepository interface {

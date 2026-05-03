@@ -16,6 +16,7 @@ import (
 	httpinfra "github.com/atvirokodosprendimai/crawlerv2/infrastructure/http"
 	"github.com/atvirokodosprendimai/crawlerv2/infrastructure/persistence"
 	"github.com/atvirokodosprendimai/crawlerv2/infrastructure/scheduler"
+	"github.com/atvirokodosprendimai/crawlerv2/infrastructure/storage"
 	"github.com/atvirokodosprendimai/crawlerv2/infrastructure/worker"
 )
 
@@ -27,6 +28,7 @@ func main() {
 			serverCmd(),
 			workerCmd(),
 			tokenCmd(),
+			migrateCmd(),
 		},
 	}
 	if err := app.Run(context.Background(), os.Args); err != nil {
@@ -58,6 +60,11 @@ func serverCmd() *cli.Command {
 				Value:   5 * time.Minute,
 				Sources: cli.EnvVars("STALE_TASK_TIMEOUT"),
 			},
+			&cli.StringFlag{
+				Name:    "storage-config",
+				Usage:   "path to storage config JSON (optional, defaults to local ./files)",
+				Sources: cli.EnvVars("STORAGE_CONFIG"),
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			db, err := persistence.Open(cmd.String("db"))
@@ -85,11 +92,35 @@ func serverCmd() *cli.Command {
 				}
 			}
 
+			// Storage registry
+			storeCfg := storage.DefaultLocalConfig("files")
+			if scPath := cmd.String("storage-config"); scPath != "" {
+				loaded, err := storage.LoadConfig(scPath)
+				if err != nil {
+					return fmt.Errorf("load storage config: %w", err)
+				}
+				storeCfg = loaded
+			}
+			registry, err := storage.NewRegistry(storeCfg)
+			if err != nil {
+				return fmt.Errorf("storage registry: %w", err)
+			}
+			if err := registry.EnsureBuckets(ctx); err != nil {
+				return fmt.Errorf("ensure buckets: %w", err)
+			}
+			storeResolver := appCrawler.StoreResolver(func(domainID uint) string {
+				s, err := registry.ForDomain(domainID)
+				if err != nil {
+					return ""
+				}
+				return s.ID()
+			})
+
 			// Use cases
 			addUC := appCrawler.NewAddDomainUseCase(domainRepo, urlRepo, jobRepo)
 			updateUC := appCrawler.NewUpdateDomainUseCase(domainRepo)
 			triggerUC := appCrawler.NewTriggerJobUseCase(domainRepo, jobRepo, urlRepo)
-			pollUC := appCrawler.NewPollTasksUseCase(jobRepo, domainRepo, urlRepo)
+			pollUC := appCrawler.NewPollTasksUseCase(jobRepo, domainRepo, urlRepo, storeResolver)
 			submitUC := appCrawler.NewSubmitResultsUseCase(jobRepo, domainRepo, urlRepo, resultRepo)
 			manageTokenUC := appCrawler.NewManageTokenUseCase(tokenRepo)
 			reclaimUC := appCrawler.NewReclaimStaleTasksUseCase(urlRepo)
@@ -157,9 +188,9 @@ func workerCmd() *cli.Command {
 				Sources:  cli.EnvVars("WORKER_TOKEN"),
 			},
 			&cli.UintFlag{
-				Name:    "job-id",
-				Required: true,
-				Sources: cli.EnvVars("JOB_ID"),
+				Name:    "domain-id",
+				Usage:   "only work on jobs for this domain (0 = any)",
+				Sources: cli.EnvVars("DOMAIN_ID"),
 			},
 			&cli.IntFlag{
 				Name:    "batch",
@@ -181,7 +212,7 @@ func workerCmd() *cli.Command {
 			cfg := worker.Config{
 				MasterURL:    cmd.String("master"),
 				Token:        cmd.String("token"),
-				JobID:        cmd.Uint("job-id"),
+				DomainID:     cmd.Uint("domain-id"),
 				BatchSize:    cmd.Int("batch"),
 				Concurrency:  cmd.Int("concurrency"),
 				PollInterval: cmd.Duration("poll-interval"),
@@ -195,8 +226,130 @@ func workerCmd() *cli.Command {
 				cancel()
 			}()
 
-			fmt.Printf("worker starting: master=%s job=%d\n", cfg.MasterURL, cfg.JobID)
+			domainInfo := "any domain"
+			if cfg.DomainID > 0 {
+				domainInfo = fmt.Sprintf("domain=%d", cfg.DomainID)
+			}
+			fmt.Printf("worker starting: master=%s %s\n", cfg.MasterURL, domainInfo)
 			worker.NewRunner(cfg).Run(runCtx)
+			return nil
+		},
+	}
+}
+
+func migrateCmd() *cli.Command {
+	return &cli.Command{
+		Name:  "migrate",
+		Usage: "migrate stored blobs from one store to another and update DB metadata",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:     "from",
+				Usage:    "source store ID",
+				Required: true,
+			},
+			&cli.StringFlag{
+				Name:     "to",
+				Usage:    "destination store ID",
+				Required: true,
+			},
+			&cli.StringFlag{
+				Name:     "storage-config",
+				Required: true,
+				Sources:  cli.EnvVars("STORAGE_CONFIG"),
+			},
+			&cli.StringFlag{
+				Name:    "db",
+				Value:   "crawlerv2.db",
+				Sources: cli.EnvVars("DATABASE_PATH"),
+			},
+			&cli.BoolFlag{
+				Name:  "delete-after",
+				Usage: "delete blobs from source after successful copy",
+			},
+			&cli.BoolFlag{
+				Name:  "skip-existing",
+				Usage: "skip keys already present in destination",
+				Value: true,
+			},
+			&cli.BoolFlag{
+				Name:  "dry-run",
+				Usage: "log actions without writing anything",
+			},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			storeCfg, err := storage.LoadConfig(cmd.String("storage-config"))
+			if err != nil {
+				return err
+			}
+			registry, err := storage.NewRegistry(storeCfg)
+			if err != nil {
+				return err
+			}
+			src, err := registry.Get(cmd.String("from"))
+			if err != nil {
+				return fmt.Errorf("source store: %w", err)
+			}
+			dst, err := registry.Get(cmd.String("to"))
+			if err != nil {
+				return fmt.Errorf("destination store: %w", err)
+			}
+
+			db, err := persistence.Open(cmd.String("db"))
+			if err != nil {
+				return err
+			}
+			resultRepo := persistence.NewCrawlResultRepository(db)
+
+			results, err := resultRepo.FindByStore(ctx, src.ID())
+			if err != nil {
+				return fmt.Errorf("query results: %w", err)
+			}
+			if len(results) == 0 {
+				fmt.Printf("no blobs found for store %q\n", src.ID())
+				return nil
+			}
+
+			keys := make([]string, len(results))
+			for i, r := range results {
+				keys[i] = r.FilePath
+			}
+
+			dryRun := cmd.Bool("dry-run")
+			opts := storage.MigrateOptions{
+				DeleteAfter:  cmd.Bool("delete-after"),
+				SkipExisting: cmd.Bool("skip-existing"),
+				DryRun:       dryRun,
+				OnProgress: func(key string, size int64, err error) {
+					if err != nil {
+						fmt.Printf("  FAIL  %s: %v\n", key, err)
+					} else {
+						fmt.Printf("  OK    %s (%d bytes)\n", key, size)
+					}
+				},
+			}
+
+			fmt.Printf("migrating %d blobs: %s → %s\n", len(keys), src.ID(), dst.ID())
+			res, err := storage.MigrateStore(ctx, src, dst, keys, opts)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("done: copied=%d skipped=%d failed=%d bytes=%d\n", res.Copied, res.Skipped, res.Failed, res.Bytes)
+
+			if !dryRun && res.Failed == 0 {
+				// Update DB store_id for all migrated results
+				updated := 0
+				for _, r := range results {
+					if r.FilePath == "" {
+						continue
+					}
+					if err := resultRepo.UpdateStore(ctx, r.ID, dst.ID()); err != nil {
+						fmt.Printf("  warn: update store_id for result %d: %v\n", r.ID, err)
+					} else {
+						updated++
+					}
+				}
+				fmt.Printf("db updated: %d records store_id → %q\n", updated, dst.ID())
+			}
 			return nil
 		},
 	}

@@ -46,6 +46,10 @@ type CrawlResult struct {
 	Title        string
 	MetaDesc     string
 	Body         string
+	FilePath     string // object key (relative path or S3 key)
+	FileSize     int64
+	FileHash     string // MD5 hex of file content
+	StoreID      string // which BlobStore holds this file
 	CreatedAt    time.Time
 }
 

@@ -7,7 +7,8 @@ Built with Go, DDD, GORM, SQLite (no CGO), chi, urfave/cli v3.
 ## Quick start
 
 ```bash
-go build -o crawlerv2 ./cmd/app
+go build -o crawlerv2  ./cmd/app   # server + worker
+go build -o crawlerctl ./cmd/ctl   # API client CLI
 ```
 
 ### 1. Start the server
@@ -30,8 +31,30 @@ Or create a token manually (server can be running):
 # 3f9a2c... (save this — shown once)
 ```
 
-### 2. Add a domain
+### 2. Configure crawlerctl (optional)
 
+```bash
+./crawlerctl config set-server http://localhost:8080
+./crawlerctl config set-token <token>
+# stored in ~/.crawlerv2.json — no need to pass flags every time
+```
+
+### 4. Add a domain
+
+With crawlerctl:
+```bash
+./crawlerctl domains add example.com \
+  --subdomains \
+  --max-depth 3 \
+  --max-pages 1000 \
+  --robots \
+  --delay 500 \
+  --conc-worker 4 \
+  --conc-global 20 \
+  --cron "0 2 * * *"
+```
+
+Or with curl:
 ```bash
 curl -X POST http://localhost:8080/api/domains \
   -H "Authorization: Bearer <token>" \
@@ -55,8 +78,14 @@ curl -X POST http://localhost:8080/api/domains \
 
 `cron` is optional — omit for manual-only crawls.
 
-### 3. Trigger a crawl job
+### 5. Trigger a crawl job
 
+With crawlerctl:
+```bash
+./crawlerctl jobs trigger 1 --title --meta
+```
+
+Or with curl:
 ```bash
 curl -X POST http://localhost:8080/api/domains/1/jobs \
   -H "Authorization: Bearer <token>" \
@@ -71,17 +100,18 @@ curl -X POST http://localhost:8080/api/domains/1/jobs \
 # returns job with id
 ```
 
-### 4. Start a worker
+### 6. Start a worker
 
 ```bash
 ./crawlerv2 worker \
   --master http://your-server:8080 \
   --token <token> \
-  --job-id 1 \
   --batch 10 \
   --concurrency 4 \
   --poll-interval 3s
 ```
+
+Workers automatically pick up tasks from any running job. Pass `--domain-id` to restrict to a specific domain.
 
 Start as many workers as you want — on any machine with network access to the master.
 
@@ -107,12 +137,12 @@ Flags:
 ./crawlerv2 worker [flags]
 
 Flags:
-  --master        Master server URL   (env: MASTER_URL)        required
-  --token         Bearer token        (env: WORKER_TOKEN)      required
-  --job-id        Job ID to work on   (env: JOB_ID)            required
-  --batch         URLs per poll       (env: WORKER_BATCH,      default: 10)
-  --concurrency   Parallel fetches    (env: WORKER_CONCURRENCY, default: 4)
-  --poll-interval Idle poll interval  (env: WORKER_POLL_INTERVAL, default: 5s)
+  --master        Master server URL             (env: MASTER_URL)           required
+  --token         Bearer token                  (env: WORKER_TOKEN)         required
+  --domain-id     Restrict to domain (optional) (env: DOMAIN_ID,            default: 0)
+  --batch         URLs per poll                 (env: WORKER_BATCH,         default: 10)
+  --concurrency   Parallel fetches              (env: WORKER_CONCURRENCY,   default: 4)
+  --poll-interval Idle poll interval            (env: WORKER_POLL_INTERVAL, default: 5s)
 ```
 
 ### `token create`
@@ -127,6 +157,62 @@ Prints the plaintext token once. Store it — it cannot be retrieved again.
 
 ```
 ./crawlerv2 token revoke --db crawl.db --id <id>
+```
+
+---
+
+## crawlerctl reference
+
+`crawlerctl` is the API client CLI. It reads server URL and token from `~/.crawlerv2.json` (set once with `config` commands) or `--server` / `--token` flags.
+
+```
+Global flags:
+  --server, -s   Master server URL  (env: CRAWLERV2_SERVER)
+  --token,  -t   Bearer token       (env: CRAWLERV2_TOKEN)
+  --json,   -j   Output raw JSON instead of table
+```
+
+### Config
+
+```bash
+crawlerctl config set-server http://your-server:8080
+crawlerctl config set-token <token>
+crawlerctl config show
+```
+
+### Domains
+
+```bash
+crawlerctl domains list
+crawlerctl domains get <id>
+crawlerctl domains add <host> [flags]
+  --subdomains          include *.host
+  --path-filter <regex> path must match
+  --max-depth <n>       max hops from seed (0=unlimited)
+  --max-pages <n>       max pages per run  (0=unlimited)
+  --robots              respect robots.txt
+  --delay <ms>          crawl delay per worker
+  --conc-worker <n>     max concurrency per worker
+  --conc-global <n>     max global concurrency for *.domain.tld
+  --cron <expr>         cron schedule (e.g. "0 2 * * *")
+crawlerctl domains update <id> [same flags as add — only set flags are changed]
+crawlerctl domains delete <id>
+```
+
+### Jobs
+
+```bash
+crawlerctl jobs list [--domain-id <id>] [--status running|pending|completed|failed]
+crawlerctl jobs get <id>
+crawlerctl jobs trigger <domain-id> [--title] [--meta] [--body]
+```
+
+### Tokens
+
+```bash
+crawlerctl tokens list
+crawlerctl tokens create [--save]   # --save writes token to ~/.crawlerv2.json
+crawlerctl tokens revoke <id>
 ```
 
 ---
@@ -262,7 +348,7 @@ All CLI flags have env var equivalents:
 | `STALE_TASK_TIMEOUT` | `--stale-timeout` | Stale task reclaim duration |
 | `MASTER_URL` | `--master` | Worker: master server URL |
 | `WORKER_TOKEN` | `--token` | Worker: bearer token |
-| `JOB_ID` | `--job-id` | Worker: job to process |
+| `DOMAIN_ID` | `--domain-id` | Worker: restrict to domain (optional) |
 | `WORKER_BATCH` | `--batch` | Worker: URLs per poll |
 | `WORKER_CONCURRENCY` | `--concurrency` | Worker: parallel fetches |
 | `WORKER_POLL_INTERVAL` | `--poll-interval` | Worker: idle poll interval |

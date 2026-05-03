@@ -39,9 +39,12 @@ type PolitenessConfig struct {
 }
 
 type ExtractConfig struct {
-	ExtractTitle       bool
-	ExtractMeta        bool
-	ExtractBody        bool
+	ExtractTitle   bool
+	ExtractMeta    bool
+	ExtractBody    bool
+	DownloadBinary bool   // download non-HTML resources to filesystem
+	FilesDir       string // base directory for saved files (default: ./files)
+	MaxFileSizeMB  int    // max file size to download (0 = unlimited)
 }
 
 // RootDomain extracts the registrable root domain from a host.

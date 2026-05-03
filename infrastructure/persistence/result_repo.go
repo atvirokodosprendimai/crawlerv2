@@ -34,6 +34,23 @@ func (r *GormCrawlResultRepository) FindByJob(ctx context.Context, jobID uint) (
 	return out, nil
 }
 
+func (r *GormCrawlResultRepository) FindByStore(ctx context.Context, storeID string) ([]crawler.CrawlResult, error) {
+	var models []CrawlResultModel
+	if err := r.db.WithContext(ctx).Where("store_id = ? AND file_path != ''", storeID).Find(&models).Error; err != nil {
+		return nil, err
+	}
+	out := make([]crawler.CrawlResult, len(models))
+	for i, m := range models {
+		out[i] = modelToResult(&m)
+	}
+	return out, nil
+}
+
+func (r *GormCrawlResultRepository) UpdateStore(ctx context.Context, resultID uint, newStoreID string) error {
+	return r.db.WithContext(ctx).Model(&CrawlResultModel{}).Where("id = ?", resultID).
+		Update("store_id", newStoreID).Error
+}
+
 func resultToModel(r *crawler.CrawlResult) CrawlResultModel {
 	return CrawlResultModel{
 		ID:           r.ID,
@@ -45,6 +62,10 @@ func resultToModel(r *crawler.CrawlResult) CrawlResultModel {
 		Title:        r.Title,
 		MetaDesc:     r.MetaDesc,
 		Body:         r.Body,
+		FilePath:     r.FilePath,
+		FileSize:     r.FileSize,
+		FileHash:     r.FileHash,
+		StoreID:      r.StoreID,
 	}
 }
 
@@ -59,6 +80,10 @@ func modelToResult(m *CrawlResultModel) crawler.CrawlResult {
 		Title:        m.Title,
 		MetaDesc:     m.MetaDesc,
 		Body:         m.Body,
+		FilePath:     m.FilePath,
+		FileSize:     m.FileSize,
+		FileHash:     m.FileHash,
+		StoreID:      m.StoreID,
 		CreatedAt:    m.CreatedAt,
 	}
 }

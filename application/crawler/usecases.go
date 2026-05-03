@@ -133,8 +133,9 @@ func (uc *TriggerJobUseCase) Execute(ctx context.Context, in TriggerJobInput) (*
 }
 
 // PollTasksInput carries worker poll parameters.
+// DomainID=0 means claim from any running job.
 type PollTasksInput struct {
-	JobID     uint
+	DomainID  uint
 	BatchSize int
 }
 
@@ -143,68 +144,91 @@ type TaskDTO struct {
 	URL           string
 	JobID         uint
 	Depth         int
+	StoreID       string // which BlobStore the worker should write to
 	ExtractConfig domain.ExtractConfig
 	Politeness    domain.PolitenessConfig
 }
 
+// StoreResolver resolves the store ID for a domain. Injected from infrastructure layer.
+type StoreResolver func(domainID uint) string
+
 type PollTasksUseCase struct {
-	jobs    domain.CrawlJobRepository
-	domains domain.DomainRepository
-	urls    domain.URLRepository
+	jobs          domain.CrawlJobRepository
+	domains       domain.DomainRepository
+	urls          domain.URLRepository
+	storeResolver StoreResolver
 }
 
-func NewPollTasksUseCase(j domain.CrawlJobRepository, d domain.DomainRepository, u domain.URLRepository) *PollTasksUseCase {
-	return &PollTasksUseCase{jobs: j, domains: d, urls: u}
+func NewPollTasksUseCase(j domain.CrawlJobRepository, d domain.DomainRepository, u domain.URLRepository, sr StoreResolver) *PollTasksUseCase {
+	return &PollTasksUseCase{jobs: j, domains: d, urls: u, storeResolver: sr}
 }
 
 func (uc *PollTasksUseCase) Execute(ctx context.Context, in PollTasksInput) ([]TaskDTO, error) {
-	job, err := uc.jobs.FindByID(ctx, in.JobID)
-	if err != nil {
-		return nil, ErrJobNotFound
-	}
-	d, err := uc.domains.FindByID(ctx, job.DomainID)
-	if err != nil {
-		return nil, ErrDomainNotFound
-	}
-
 	batchSize := in.BatchSize
 	if batchSize <= 0 {
 		batchSize = 10
 	}
 
-	// Enforce global concurrency cap
-	if d.PolitenessConfig.MaxConcurrencyGlobal > 0 {
-		rootDom := domain.RootDomain(d.Host)
-		inFlight, err := uc.urls.CountInProgress(ctx, rootDom)
-		if err != nil {
-			return nil, err
-		}
-		available := int64(d.PolitenessConfig.MaxConcurrencyGlobal) - inFlight
-		if available <= 0 {
-			return nil, nil
-		}
-		if int64(batchSize) > available {
-			batchSize = int(available)
-		}
-	}
-
-	records, err := uc.urls.ClaimBatch(ctx, in.JobID, batchSize)
+	// Find running jobs (optionally filtered by domain)
+	runningJobs, err := uc.jobs.FindRunning(ctx, in.DomainID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("find running jobs: %w", err)
+	}
+	if len(runningJobs) == 0 {
+		return nil, nil
 	}
 
-	tasks := make([]TaskDTO, len(records))
-	for i, r := range records {
-		tasks[i] = TaskDTO{
-			TaskID:        r.ID,
-			URL:           r.RawURL,
-			JobID:         r.JobID,
-			Depth:         r.Depth,
-			ExtractConfig: job.ExtractConfig,
-			Politeness:    d.PolitenessConfig,
+	// Try each running job until we claim some tasks
+	for _, job := range runningJobs {
+		d, err := uc.domains.FindByID(ctx, job.DomainID)
+		if err != nil {
+			continue
 		}
+
+		cap := batchSize
+
+		// Enforce global concurrency cap per root domain
+		if d.PolitenessConfig.MaxConcurrencyGlobal > 0 {
+			rootDom := domain.RootDomain(d.Host)
+			inFlight, err := uc.urls.CountInProgress(ctx, rootDom)
+			if err != nil {
+				continue
+			}
+			available := int64(d.PolitenessConfig.MaxConcurrencyGlobal) - inFlight
+			if available <= 0 {
+				continue
+			}
+			if int64(cap) > available {
+				cap = int(available)
+			}
+		}
+
+		records, err := uc.urls.ClaimBatch(ctx, job.ID, cap)
+		if err != nil || len(records) == 0 {
+			continue
+		}
+
+		storeID := ""
+		if uc.storeResolver != nil {
+			storeID = uc.storeResolver(d.ID)
+		}
+
+		tasks := make([]TaskDTO, len(records))
+		for i, r := range records {
+			tasks[i] = TaskDTO{
+				TaskID:        r.ID,
+				URL:           r.RawURL,
+				JobID:         r.JobID,
+				Depth:         r.Depth,
+				StoreID:       storeID,
+				ExtractConfig: job.ExtractConfig,
+				Politeness:    d.PolitenessConfig,
+			}
+		}
+		return tasks, nil
 	}
-	return tasks, nil
+
+	return nil, nil
 }
 
 // SubmitResultInput is one crawled URL result with its discovered links.
@@ -219,6 +243,10 @@ type SubmitResultInput struct {
 	MetaDesc     string
 	Body         string
 	Links        []string
+	FilePath     string
+	FileSize     int64
+	FileHash     string
+	StoreID      string
 	Error        string
 }
 
@@ -268,6 +296,10 @@ func (uc *SubmitResultsUseCase) Execute(ctx context.Context, jobID uint, inputs 
 			ContentType:  inp.ContentType,
 			Title:        inp.Title,
 			MetaDesc:     inp.MetaDesc,
+			FilePath:     inp.FilePath,
+			FileSize:     inp.FileSize,
+			FileHash:     inp.FileHash,
+			StoreID:      inp.StoreID,
 		}
 		if job.ExtractConfig.ExtractBody {
 			result.Body = inp.Body

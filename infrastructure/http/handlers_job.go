@@ -29,9 +29,12 @@ func (h *JobHandlers) Trigger(w http.ResponseWriter, r *http.Request) {
 	job, err := h.triggerUC.Execute(r.Context(), appCrawler.TriggerJobInput{
 		DomainID: domainID,
 		ExtractConfig: domain.ExtractConfig{
-			ExtractTitle: req.ExtractConfig.ExtractTitle,
-			ExtractMeta:  req.ExtractConfig.ExtractMeta,
-			ExtractBody:  req.ExtractConfig.ExtractBody,
+			ExtractTitle:   req.ExtractConfig.ExtractTitle,
+			ExtractMeta:    req.ExtractConfig.ExtractMeta,
+			ExtractBody:    req.ExtractConfig.ExtractBody,
+			DownloadBinary: req.ExtractConfig.DownloadBinary,
+			FilesDir:       req.ExtractConfig.FilesDir,
+			MaxFileSizeMB:  req.ExtractConfig.MaxFileSizeMB,
 		},
 	})
 	if err != nil {

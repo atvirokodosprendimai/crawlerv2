@@ -19,14 +19,10 @@ func NewWorkerHandlers(poll *appCrawler.PollTasksUseCase, submit *appCrawler.Sub
 func (h *WorkerHandlers) Poll(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	var jobID uint
-	if s := q.Get("job_id"); s != "" {
+	var domainID uint
+	if s := q.Get("domain_id"); s != "" {
 		n, _ := strconv.ParseUint(s, 10, 64)
-		jobID = uint(n)
-	}
-	if jobID == 0 {
-		jsonError(w, http.StatusBadRequest, "job_id required")
-		return
+		domainID = uint(n)
 	}
 
 	batch := 10
@@ -37,7 +33,7 @@ func (h *WorkerHandlers) Poll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tasks, err := h.pollUC.Execute(r.Context(), appCrawler.PollTasksInput{
-		JobID:     jobID,
+		DomainID:  domainID,
 		BatchSize: batch,
 	})
 	if err != nil {
@@ -58,14 +54,18 @@ func (h *WorkerHandlers) Poll(w http.ResponseWriter, r *http.Request) {
 	resp := make([]TaskResponse, len(tasks))
 	for i, t := range tasks {
 		resp[i] = TaskResponse{
-			TaskID: t.TaskID,
-			URL:    t.URL,
-			JobID:  t.JobID,
-			Depth:  t.Depth,
-			ExtractConfig: ExtractConfigDTO{
-				ExtractTitle: t.ExtractConfig.ExtractTitle,
-				ExtractMeta:  t.ExtractConfig.ExtractMeta,
-				ExtractBody:  t.ExtractConfig.ExtractBody,
+			TaskID:  t.TaskID,
+			URL:     t.URL,
+			JobID:   t.JobID,
+			Depth:   t.Depth,
+			StoreID: t.StoreID,
+			Extract: ExtractConfigDTO{
+				ExtractTitle:   t.ExtractConfig.ExtractTitle,
+				ExtractMeta:    t.ExtractConfig.ExtractMeta,
+				ExtractBody:    t.ExtractConfig.ExtractBody,
+				DownloadBinary: t.ExtractConfig.DownloadBinary,
+				FilesDir:       t.ExtractConfig.FilesDir,
+				MaxFileSizeMB:  t.ExtractConfig.MaxFileSizeMB,
 			},
 			Politeness: PolitenessConfigDTO{
 				RespectRobotsTxt:        t.Politeness.RespectRobotsTxt,
@@ -104,6 +104,10 @@ func (h *WorkerHandlers) SubmitResults(w http.ResponseWriter, r *http.Request) {
 			MetaDesc:     item.MetaDesc,
 			Body:         item.Body,
 			Links:        item.Links,
+			FilePath:     item.FilePath,
+			FileSize:     item.FileSize,
+			FileHash:     item.FileHash,
+			StoreID:      item.StoreID,
 			Error:        item.Error,
 		}
 	}

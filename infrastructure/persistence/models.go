@@ -35,9 +35,12 @@ type CrawlJobModel struct {
 	EndedAt   *time.Time
 
 	// ExtractConfig
-	ExtractTitle bool
-	ExtractMeta  bool
-	ExtractBody  bool
+	ExtractTitle   bool
+	ExtractMeta    bool
+	ExtractBody    bool
+	DownloadBinary bool
+	FilesDir       string
+	MaxFileSizeMB  int
 
 	PagesCrawled int
 	CreatedAt    time.Time
@@ -72,6 +75,10 @@ type CrawlResultModel struct {
 	Title        string
 	MetaDesc     string
 	Body         string `gorm:"type:text"`
+	FilePath     string `gorm:"index"` // object key
+	FileSize     int64
+	FileHash     string
+	StoreID      string `gorm:"index"` // BlobStore ID
 	CreatedAt    time.Time
 }
 
